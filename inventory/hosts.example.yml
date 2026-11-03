@@ -1,0 +1,12 @@
+---
+all:
+  children:
+    vps:
+      hosts:
+        debian_vps:
+          ansible_host: 192.168.1.100
+          ansible_user: deploy
+          ansible_port: 22
+          ansible_connection: ssh
+          ansible_python_interpreter: /usr/bin/python3
+          ansible_ssh_common_args: '-o StrictHostKeyChecking=accept-new'

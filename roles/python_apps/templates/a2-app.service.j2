@@ -1,0 +1,34 @@
+[Unit]
+Description=Projeto A2 - Servidor Python HTTP ({{ servidor.nome }})
+After=network-online.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory={{ dir_dados }}
+ExecStart={{ python_bin }} {{ dir_dados }}/bin/app_server.py \
+  --name {{ servidor.nome }} \
+  --bind {{ app_bind_ip }} \
+  --port {{ servidor.porta }} \
+  --color "{{ servidor.cor }}" \
+  --color-dark "{{ servidor.cor_escura }}" \
+  --color-light "{{ servidor.cor_clara }}" \
+  --color-name "{{ servidor.cor_nome }}" \
+  --app1-port {{ app_servers[0].porta }} \
+  --app2-port {{ app_servers[1].porta }} \
+  --app3-port {{ app_servers[2].porta }} \
+  --app4-port {{ app_servers[3].porta }} \
+  --lb1-port {{ load_balancers[0].porta }} \
+  --lb2-port {{ load_balancers[1].porta }}
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Restart=always
+RestartSec=2s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

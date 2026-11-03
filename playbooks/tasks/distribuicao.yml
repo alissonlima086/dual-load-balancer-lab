@@ -1,0 +1,29 @@
+---
+- name: "Distribuicao | Enviar {{ requisicoes_por_lb }} requisicoes para cada balanceador Caddy"
+  ansible.builtin.uri:
+    url: "http://{{ lb_probe_ip }}:{{ item.0.porta }}/"
+    return_content: false
+    status_code: 200
+  loop: "{{ load_balancers | product(range(requisicoes_por_lb | int)) | list }}"
+  loop_control:
+    label: "{{ item.0.nome }} (req #{{ item.1 + 1 }})"
+  register: _dist_respostas
+
+- name: "Distribuicao | Processar respostas por balanceador e aplicacao"
+  ansible.builtin.set_fact:
+    _contagem_raw: >-
+      {%- set c = {} -%}
+      {%- for r in _dist_respostas.results -%}
+      {%-   set k = r.x_load_balancer ~ ' -> ' ~ r.x_servidor -%}
+      {%-   set _ = c.update({k: (c[k] | default(0)) + 1}) -%}
+      {%- endfor -%}
+      {{ c | to_json }}
+    servidores_vistos: "{{ _dist_respostas.results | map(attribute='x_servidor') | unique | sort }}"
+
+- name: "Distribuicao | Converter contagem para dicionario estruturado"
+  ansible.builtin.set_fact:
+    contagem: "{{ _contagem_raw | from_json }}"
+
+- name: "Distribuicao | Exibir mapa de distribuicao de requisicoes"
+  ansible.builtin.debug:
+    var: contagem

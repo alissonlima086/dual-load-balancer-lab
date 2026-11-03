@@ -1,0 +1,80 @@
+---
+- name: Remover o ambiente
+  hosts: vps
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Parar e remover containers Caddy (lb1 e lb2)
+      community.docker.docker_container:
+        name: "{{ item.nome }}"
+        state: absent
+        force_kill: true
+      loop: "{{ load_balancers }}"
+      loop_control:
+        label: "{{ item.nome }}"
+
+    - name: Remover rede Docker a2_net
+      community.docker.docker_network:
+        name: "{{ rede.nome }}"
+        state: absent
+
+    - name: Parar e desabilitar servicos systemd das aplicacoes
+      ansible.builtin.systemd_service:
+        name: "a2-{{ item.nome }}"
+        state: stopped
+        enabled: false
+      loop: "{{ app_servers }}"
+      loop_control:
+        label: "a2-{{ item.nome }}"
+      failed_when: false
+
+    - name: Remover arquivos de servico systemd
+      ansible.builtin.file:
+        path: "/etc/systemd/system/a2-{{ item.nome }}.service"
+        state: absent
+      loop: "{{ app_servers }}"
+      loop_control:
+        label: "a2-{{ item.nome }}.service"
+
+    - name: Recarregar systemd apos remocao dos servicos
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Remover diretorio de dados do projeto (/opt/a2)
+      ansible.builtin.file:
+        path: "{{ dir_dados }}"
+        state: absent
+
+    - name: Verificar se o firewall UFW esta instalado
+      ansible.builtin.stat:
+        path: /usr/sbin/ufw
+      register: ufw_bin
+
+    - name: Remover regras do UFW para as portas das aplicacoes
+      community.general.ufw:
+        rule: allow
+        src: "{{ rede.subnet }}"
+        proto: tcp
+        to_port: "{{ item.porta | string }}"
+        delete: true
+      loop: "{{ app_servers }}"
+      loop_control:
+        label: "{{ item.nome }} (:{{ item.porta }})"
+      when: ufw_bin.stat.exists
+
+    - name: Remover regras legadas do UFW para os balanceadores Caddy
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        to_port: "{{ item.porta | string }}"
+        delete: true
+      loop: "{{ load_balancers }}"
+      loop_control:
+        label: "{{ item.nome }} (:{{ item.porta }})"
+      when: ufw_bin.stat.exists
+      failed_when: false
+
+    - name: Conclusao da remocao
+      ansible.builtin.debug:
+        msg: "Ambiente removido completamente."

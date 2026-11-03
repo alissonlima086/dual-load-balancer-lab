@@ -1,0 +1,11 @@
+lb.exemplo.com {
+    reverse_proxy 127.0.0.1:31081 127.0.0.1:31082 {
+        lb_policy round_robin
+        lb_try_duration 3s
+        lb_try_interval 250ms
+        health_uri /health
+        health_interval 3s
+        health_timeout 1s
+        fail_duration 5s
+    }
+}

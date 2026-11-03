@@ -1,0 +1,58 @@
+---
+projeto: a2
+dir_dados: "{{ lookup('ansible.builtin.env', 'A2_DATA_DIR') | default('/opt/a2', true) }}"
+python_bin: /usr/bin/python3
+
+rede:
+  nome: "{{ lookup('ansible.builtin.env', 'A2_DOCKER_NET_NAME') | default('a2_net', true) }}"
+  subnet: "{{ lookup('ansible.builtin.env', 'A2_DOCKER_SUBNET') | default('172.28.0.0/24', true) }}"
+  gateway: "{{ lookup('ansible.builtin.env', 'A2_DOCKER_GATEWAY') | default('172.28.0.1', true) }}"
+
+app_bind_ip: "{{ rede.gateway }}"
+lb_probe_ip: "{{ '127.0.0.1' if lb_bind_ip == '0.0.0.0' else lb_bind_ip }}"
+front_url: "{{ lookup('ansible.builtin.env', 'A2_FRONT_URL') | default('', true) }}"
+
+imagens:
+  caddy: caddy:2.8.4-alpine
+
+lb_bind_ip: "{{ lookup('ansible.builtin.env', 'LB_BIND_IP') | default('127.0.0.1', true) }}"
+load_balancers:
+  - nome: lb1
+    porta: "{{ (lookup('ansible.builtin.env', 'LB1_PORT') | default(31081, true)) | int }}"
+  - nome: lb2
+    porta: "{{ (lookup('ansible.builtin.env', 'LB2_PORT') | default(31082, true)) | int }}"
+
+app_servers:
+  - nome: app1
+    porta: "{{ (lookup('ansible.builtin.env', 'APP1_PORT') | default(31001, true)) | int }}"
+    cor_nome: Azul
+    cor: "#2563EB"
+    cor_escura: "#1E3A8A"
+    cor_clara: "#DBEAFE"
+  - nome: app2
+    porta: "{{ (lookup('ansible.builtin.env', 'APP2_PORT') | default(31002, true)) | int }}"
+    cor_nome: Verde
+    cor: "#059669"
+    cor_escura: "#064E3B"
+    cor_clara: "#D1FAE5"
+  - nome: app3
+    porta: "{{ (lookup('ansible.builtin.env', 'APP3_PORT') | default(31003, true)) | int }}"
+    cor_nome: Laranja
+    cor: "#EA580C"
+    cor_escura: "#7C2D12"
+    cor_clara: "#FFEDD5"
+  - nome: app4
+    porta: "{{ (lookup('ansible.builtin.env', 'APP4_PORT') | default(31004, true)) | int }}"
+    cor_nome: Roxo
+    cor: "#7C3AED"
+    cor_escura: "#4C1D95"
+    cor_clara: "#EDE9FE"
+
+balanceamento:
+  politica: "{{ lookup('ansible.builtin.env', 'A2_LB_POLICY') | default('round_robin', true) }}"
+  tentativa_duracao: "{{ lookup('ansible.builtin.env', 'A2_LB_TRY_DURATION') | default('3s', true) }}"
+  tentativa_intervalo: "{{ lookup('ansible.builtin.env', 'A2_LB_TRY_INTERVAL') | default('250ms', true) }}"
+  health_uri: "{{ lookup('ansible.builtin.env', 'A2_HEALTH_URI') | default('/health', true) }}"
+  health_intervalo: "{{ lookup('ansible.builtin.env', 'A2_HEALTH_INTERVAL') | default('3s', true) }}"
+  health_timeout: "{{ lookup('ansible.builtin.env', 'A2_HEALTH_TIMEOUT') | default('1s', true) }}"
+  fail_duration: "{{ lookup('ansible.builtin.env', 'A2_FAIL_DURATION') | default('5s', true) }}"

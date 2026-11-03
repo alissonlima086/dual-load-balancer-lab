@@ -1,0 +1,63 @@
+---
+- name: Verificar o ambiente
+  hosts: vps
+  become: true
+  gather_facts: false
+
+  vars:
+    requisicoes_por_lb: 20
+
+  tasks:
+    - name: Inspecionar containers Caddy (lb1 e lb2)
+      community.docker.docker_container_info:
+        name: "{{ item.nome }}"
+      loop: "{{ load_balancers }}"
+      loop_control:
+        label: "{{ item.nome }}"
+      register: caddy_containers
+
+    - name: Validar que os containers Caddy estao em execucao
+      ansible.builtin.assert:
+        that:
+          - item.exists
+          - item.container.State.Running
+        fail_msg: "Container {{ item.item.nome }} nao esta rodando"
+        success_msg: "Container {{ item.item.nome }} em execucao (porta {{ item.item.porta }})"
+      loop: "{{ caddy_containers.results }}"
+      loop_control:
+        label: "{{ item.item.nome }}"
+
+    - name: Inspecionar estado dos servicos systemd das aplicacoes
+      ansible.builtin.systemd_service:
+        name: "a2-{{ item.nome }}"
+      loop: "{{ app_servers }}"
+      loop_control:
+        label: "a2-{{ item.nome }}"
+      register: systemd_status
+
+    - name: Confirmar que todos os servicos Python estao ativos
+      ansible.builtin.assert:
+        that:
+          - item.status.ActiveState == "active"
+        fail_msg: "Servico a2-{{ item.item.nome }} nao esta ativo no systemd"
+        success_msg: "Servico a2-{{ item.item.nome }} ativo no systemd (porta {{ item.item.porta }})"
+      loop: "{{ systemd_status.results }}"
+      loop_control:
+        label: "a2-{{ item.item.nome }}"
+
+    - name: Executar medicao de distribuicao de requisicoes
+      ansible.builtin.include_tasks: tasks/distribuicao.yml
+
+    - name: Validar que todos os 4 servidores Python atenderam requisicoes
+      ansible.builtin.assert:
+        that:
+          - servidores_vistos == (app_servers | map(attribute='nome') | sort)
+        fail_msg: "Alguns servidores nao responderam: {{ servidores_vistos }}"
+        success_msg: "Todos os 4 servidores responderam: {{ servidores_vistos | join(', ') }}"
+
+    - name: Relatorio de verificacao
+      ansible.builtin.debug:
+        msg:
+          - "Containers Caddy (lb1, lb2): OK"
+          - "Servidores Python (app1..app4): OK"
+          - "Balanceamento Round-Robin: OK"

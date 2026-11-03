@@ -1,0 +1,61 @@
+---
+- name: Criar diretorio para scripts executaveis da aplicacao
+  ansible.builtin.file:
+    path: "{{ dir_dados }}/bin"
+    state: directory
+    mode: "0755"
+
+- name: Instalar script do servidor HTTP em Python
+  ansible.builtin.copy:
+    src: app_server.py
+    dest: "{{ dir_dados }}/bin/app_server.py"
+    mode: "0755"
+  notify: Reiniciar servicos python
+
+- name: Criar unidades systemd para cada servidor de aplicacao
+  ansible.builtin.template:
+    src: a2-app.service.j2
+    dest: "/etc/systemd/system/a2-{{ servidor.nome }}.service"
+    mode: "0644"
+  loop: "{{ app_servers }}"
+  loop_control:
+    loop_var: servidor
+    label: "a2-{{ servidor.nome }}.service"
+  notify:
+    - Recarregar systemd
+    - Reiniciar servicos python
+
+- name: Aplicar alteracoes no systemd agora se necessario
+  ansible.builtin.meta: flush_handlers
+
+- name: Habilitar e iniciar servicos de aplicacao no systemd
+  ansible.builtin.systemd_service:
+    name: "a2-{{ item.nome }}"
+    state: started
+    enabled: true
+  loop: "{{ app_servers }}"
+  loop_control:
+    label: "a2-{{ item.nome }}"
+
+- name: Aguardar portas dos servidores Python estarem abertas no gateway da rede
+  ansible.builtin.wait_for:
+    host: "{{ app_bind_ip }}"
+    port: "{{ item.porta }}"
+    state: started
+    timeout: 10
+  loop: "{{ app_servers }}"
+  loop_control:
+    label: "{{ item.nome }} (:{{ item.porta }})"
+
+- name: Verificar se cada servidor Python responde em /health
+  ansible.builtin.uri:
+    url: "http://{{ app_bind_ip }}:{{ item.porta }}{{ balanceamento.health_uri }}"
+    status_code: 200
+    return_content: true
+  loop: "{{ app_servers }}"
+  loop_control:
+    label: "{{ item.nome }} (:{{ item.porta }})"
+  register: health_check
+  until: health_check.status == 200 and ('ok ' ~ item.nome) in health_check.content
+  retries: 5
+  delay: 1

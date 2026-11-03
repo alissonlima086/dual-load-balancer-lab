@@ -1,0 +1,21 @@
+---
+- name: Implantar infraestrutura distribuida
+  hosts: vps
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: rede_docker
+    - role: python_apps
+    - role: caddy_lb
+
+  post_tasks:
+    - name: Resumo do ambiente implantado
+      ansible.builtin.debug:
+        msg:
+          - "Projeto A2 implantado com sucesso!"
+          - "Balanceadores Caddy (Docker em {{ lb_bind_ip }}):"
+          - "{% for lb in load_balancers %}  - {{ lb.nome }}: http://{{ lb_probe_ip }}:{{ lb.porta }}{% endfor %}"
+          - "Servidores Python (systemd em {{ app_bind_ip }}):"
+          - "{% for app in app_servers %}  - {{ app.nome }} ({{ app.cor_nome }}): porta {{ app.porta }}{% endfor %}"
+          - "{% if front_url | length > 0 %}Ponto de entrada publico: {{ front_url }}{% else %}Aviso: A2_FRONT_URL nao definido no .env{% endif %}"

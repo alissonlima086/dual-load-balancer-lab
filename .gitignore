@@ -1,0 +1,15 @@
+.env
+!.env.example
+
+.venv/
+__pycache__/
+*.pyc
+
+*.retry
+*.log
+
+.direnv/
+
+.DS_Store
+.vscode/
+*.swp

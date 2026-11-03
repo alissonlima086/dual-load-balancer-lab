@@ -1,0 +1,290 @@
+---
+- name: Testes de Tolerancia a Falhas e Balanceamento
+  hosts: vps
+  become: true
+  gather_facts: false
+
+  vars:
+    requisicoes_por_lb: 20
+
+  tasks:
+    # T3: Distribuicao de carga uniforme
+    - name: "T3 | Bloco de teste de distribuicao uniforme"
+      tags: [t3, todos]
+      block:
+        - name: "T3 | Executar medicao de distribuicao"
+          ansible.builtin.include_tasks: tasks/distribuicao.yml
+
+        - name: "T3 | Validar uniformidade estrita de distribuicao"
+          ansible.builtin.assert:
+            that:
+              - contagem | length == (load_balancers | length) * (app_servers | length)
+              - contagem.values() | unique | list == [ (requisicoes_por_lb / (app_servers | length)) | int ]
+            fail_msg: "Distribuicao nao uniforme detectada: {{ contagem }}"
+            success_msg: "T3 APROVADO: Carga distribuida uniformemente"
+
+    # T4: Queda de um servidor com trafego continuo
+    - name: "T4 | Bloco de teste de queda do app2"
+      tags: [t4, todos]
+      block:
+        - name: "T4 | Simular falha: parar servico a2-app2"
+          ansible.builtin.systemd_service:
+            name: a2-app2
+            state: stopped
+
+        - name: "T4 | Enviar 30 requisicoes durante a indisponibilidade do app2"
+          ansible.builtin.uri:
+            url: "http://{{ lb_probe_ip }}:{{ load_balancers[0].porta }}/"
+            return_content: false
+            status_code: 200
+          loop: "{{ range(30) | list }}"
+          loop_control:
+            label: "req #{{ item + 1 }}"
+          register: t4_respostas
+
+        - name: "T4 | Validar resiliencia do Caddy (zero erros e app2 fora do rodizio)"
+          ansible.builtin.assert:
+            that:
+              - "'app2' not in (t4_respostas.results | map(attribute='x_servidor') | list)"
+              - (t4_respostas.results | selectattr('status', 'equalto', 200) | list | length) == 30
+            fail_msg: "O app2 ainda respondeu ou houve requisicoes com erro"
+            success_msg: "T4 APROVADO: 30 requisicoes atendidas com 200 OK e app2 retirado automaticamente"
+      rescue:
+        - name: "T4 | Notificar falha no teste T4"
+          ansible.builtin.fail:
+            msg: "Falha na validacao do teste T4. Restaurando servico..."
+      always:
+        - name: "T4 | Garantir restauracao do servico a2-app2"
+          ansible.builtin.systemd_service:
+            name: a2-app2
+            state: started
+
+        - name: "T4 | Aguardar porta do app2 estar ativa apos recuperacao"
+          ansible.builtin.wait_for:
+            host: "{{ app_bind_ip }}"
+            port: "{{ app_servers[1].porta }}"
+            state: started
+            timeout: 10
+
+    # T5: Recuperacao independente de nó
+    - name: "T5 | Bloco de teste de recuperacao independente do app2"
+      tags: [t5, todos]
+      block:
+        - name: "T5 | Simular indisponibilidade inicial do app2"
+          ansible.builtin.systemd_service:
+            name: a2-app2
+            state: stopped
+
+        - name: "T5 | Confirmar que app2 saiu do rodizio antes da recuperacao"
+          ansible.builtin.uri:
+            url: "http://{{ lb_probe_ip }}:{{ load_balancers[0].porta }}/"
+            status_code: 200
+          loop: "{{ range(8) | list }}"
+          loop_control:
+            label: "drain req #{{ item + 1 }}"
+          register: t5_drain
+          failed_when: t5_drain.x_servidor == 'app2'
+
+        - name: "T5 | Iniciar servico a2-app2 para processo de reintegracao"
+          ansible.builtin.systemd_service:
+            name: a2-app2
+            state: started
+
+        - name: "T5 | Aguardar porta do app2 estar ativa"
+          ansible.builtin.wait_for:
+            host: "{{ app_bind_ip }}"
+            port: "{{ app_servers[1].porta }}"
+            state: started
+            timeout: 10
+
+        - name: "T5 | Aguardar Caddy reintegrar app2 via health check ativo"
+          ansible.builtin.uri:
+            url: "http://{{ lb_probe_ip }}:{{ load_balancers[0].porta }}/"
+            status_code: 200
+          register: t5_check
+          until: t5_check.x_servidor == 'app2'
+          retries: 15
+          delay: 2
+
+        - name: "T5 | Validar retorno do app2 ao rodizio"
+          ansible.builtin.assert:
+            that:
+              - t5_check.x_servidor == 'app2'
+            success_msg: "T5 APROVADO: app2 reintegrado com sucesso"
+      rescue:
+        - name: "T5 | Notificar falha no teste T5"
+          ansible.builtin.fail:
+            msg: "Falha na validacao do teste T5. Restaurando servico..."
+      always:
+        - name: "T5 | Garantir restauracao do servico a2-app2"
+          ansible.builtin.systemd_service:
+            name: a2-app2
+            state: started
+
+        - name: "T5 | Aguardar porta do app2 estar ativa"
+          ansible.builtin.wait_for:
+            host: "{{ app_bind_ip }}"
+            port: "{{ app_servers[1].porta }}"
+            state: started
+            timeout: 10
+
+    # T6: Falha multipla (1 no sobrevivente)
+    - name: "T6 | Bloco de teste de falha multipla"
+      tags: [t6, todos]
+      block:
+        - name: "T6 | Simular falha: parar app1, app2 e app3 no systemd"
+          ansible.builtin.systemd_service:
+            name: "a2-{{ item }}"
+            state: stopped
+          loop: [app1, app2, app3]
+
+        - name: "T6 | Enviar 12 requisicoes com apenas app4 em execucao"
+          ansible.builtin.uri:
+            url: "http://{{ lb_probe_ip }}:{{ load_balancers[0].porta }}/"
+            return_content: false
+            status_code: 200
+          loop: "{{ range(12) | list }}"
+          loop_control:
+            label: "req #{{ item + 1 }}"
+          register: t6_respostas
+
+        - name: "T6 | Validar que app4 sustentou 100% das requisicoes"
+          ansible.builtin.assert:
+            that:
+              - (t6_respostas.results | map(attribute='x_servidor') | unique | list) == ['app4']
+              - (t6_respostas.results | selectattr('status', 'equalto', 200) | list | length) == 12
+            fail_msg: "Servidor inesperado respondeu ou houve falha"
+            success_msg: "T6 APROVADO: app4 atendeu todas as requisicoes sozinho"
+      rescue:
+        - name: "T6 | Notificar falha no teste T6"
+          ansible.builtin.fail:
+            msg: "Falha na validacao do teste T6. Restaurando servicos..."
+      always:
+        - name: "T6 | Restaurar servicos app1, app2 e app3"
+          ansible.builtin.systemd_service:
+            name: "a2-{{ item }}"
+            state: started
+          loop: [app1, app2, app3]
+
+        - name: "T6 | Aguardar portas dos servicos restaurados"
+          ansible.builtin.wait_for:
+            host: "{{ app_bind_ip }}"
+            port: "{{ item.porta }}"
+            state: started
+            timeout: 10
+          loop: "{{ app_servers[:3] }}"
+
+    # T7: Failover real via dominio publico
+    - name: "T7 | Aviso de teste pulado (A2_FRONT_URL nao definido)"
+      ansible.builtin.debug:
+        msg: "T7 PULADO: A2_FRONT_URL nao configurada no .env"
+      when: front_url | length == 0
+      tags: [t7, todos]
+
+    - name: "T7 | Bloco de teste de failover via dominio publico"
+      when: front_url | length > 0
+      tags: [t7, todos]
+      block:
+        - name: "T7 | Simular queda: parar container lb1"
+          community.docker.docker_container:
+            name: "{{ load_balancers[0].nome }}"
+            state: stopped
+
+        - name: "T7 | Enviar 30 requisicoes durante indisponibilidade do lb1"
+          ansible.builtin.uri:
+            url: "{{ front_url }}/"
+            validate_certs: true
+            status_code: 200
+            return_content: false
+          loop: "{{ range(30) | list }}"
+          loop_control:
+            label: "req lb2 #{{ item + 1 }}"
+          register: t7_etapa1
+
+        - name: "T7 | Validar atendimento exclusivo pelo lb2"
+          ansible.builtin.assert:
+            that:
+              - (t7_etapa1.results | map(attribute='x_load_balancer') | unique | list) == ['lb2']
+              - (t7_etapa1.results | selectattr('status', 'equalto', 200) | list | length) == 30
+            fail_msg: "Falhas detectadas no failover para lb2"
+            success_msg: "T7 (Etapa 1) APROVADO: 30 requisicoes atendidas pelo lb2"
+
+        - name: "T7 | Reiniciar container lb1"
+          community.docker.docker_container:
+            name: "{{ load_balancers[0].nome }}"
+            state: started
+
+        - name: "T7 | Aguardar porta do lb1 estar aberta"
+          ansible.builtin.wait_for:
+            host: "{{ lb_probe_ip }}"
+            port: "{{ load_balancers[0].porta }}"
+            state: started
+            timeout: 15
+
+        - name: "T7 | Aguardar reintegracao do lb1 no Caddy frontal"
+          ansible.builtin.uri:
+            url: "{{ front_url }}/"
+            validate_certs: true
+            status_code: 200
+          register: t7_reintegracao
+          until: t7_reintegracao.x_load_balancer == 'lb1'
+          retries: 15
+          delay: 2
+
+        - name: "T7 | Simular queda: parar container lb2"
+          community.docker.docker_container:
+            name: "{{ load_balancers[1].nome }}"
+            state: stopped
+
+        - name: "T7 | Enviar 30 requisicoes durante indisponibilidade do lb2"
+          ansible.builtin.uri:
+            url: "{{ front_url }}/"
+            validate_certs: true
+            status_code: 200
+            return_content: false
+          loop: "{{ range(30) | list }}"
+          loop_control:
+            label: "req lb1 #{{ item + 1 }}"
+          register: t7_etapa2
+
+        - name: "T7 | Validar atendimento exclusivo pelo lb1"
+          ansible.builtin.assert:
+            that:
+              - (t7_etapa2.results | map(attribute='x_load_balancer') | unique | list) == ['lb1']
+              - (t7_etapa2.results | selectattr('status', 'equalto', 200) | list | length) == 30
+            fail_msg: "Falhas detectadas no failover para lb1"
+            success_msg: "T7 (Etapa 2) APROVADO: 30 requisicoes atendidas pelo lb1"
+      rescue:
+        - name: "T7 | Notificar falha no teste T7"
+          ansible.builtin.fail:
+            msg: "Falha na validacao do teste T7. Restaurando containers..."
+      always:
+        - name: "T7 | Garantir restauracao dos containers lb1 e lb2"
+          community.docker.docker_container:
+            name: "{{ item.nome }}"
+            state: started
+          loop: "{{ load_balancers }}"
+          loop_control:
+            label: "{{ item.nome }}"
+
+        - name: "T7 | Aguardar portas dos balanceadores estarem ativas"
+          ansible.builtin.wait_for:
+            host: "{{ lb_probe_ip }}"
+            port: "{{ item.porta }}"
+            state: started
+            timeout: 15
+          loop: "{{ load_balancers }}"
+          loop_control:
+            label: "{{ item.nome }} (:{{ item.porta }})"
+
+    # Resumo final
+    - name: Resumo dos Testes
+      ansible.builtin.debug:
+        msg:
+          - "RESULTADO DOS TESTES DE TOLERANCIA A FALHAS:"
+          - "T3 (Distribuicao Uniforme): APROVADO"
+          - "T4 (Queda de 1 No com Trafego Continuo): APROVADO"
+          - "T5 (Recuperacao Independente de 1 No): APROVADO"
+          - "T6 (Falha Multipla de 3 Nos): APROVADO"
+          - "{% if front_url | length > 0 %}T7 (Failover Real via Dominio Publico): APROVADO{% else %}T7: PULADO (configure A2_FRONT_URL no .env){% endif %}"
+      tags: [todos]

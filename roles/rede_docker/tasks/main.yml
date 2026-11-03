@@ -1,0 +1,51 @@
+---
+- name: Garantir que o Docker esta instalado
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: docker_bin
+
+- name: Validar presenca do binario do Docker
+  ansible.builtin.assert:
+    that: docker_bin.stat.exists
+    fail_msg: "Docker nao encontrado no host. Instale-o antes."
+
+- name: Garantir SDK Python do Docker no alvo
+  ansible.builtin.apt:
+    name: python3-docker
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Garantir diretorio base do projeto
+  ansible.builtin.file:
+    path: "{{ dir_dados }}"
+    state: directory
+    mode: "0755"
+
+- name: Criar rede Docker dedicada para os balanceadores Caddy
+  community.docker.docker_network:
+    name: "{{ rede.nome }}"
+    driver: bridge
+    ipam_config:
+      - subnet: "{{ rede.subnet }}"
+        gateway: "{{ rede.gateway }}"
+    labels:
+      projeto: "{{ projeto }}"
+    state: present
+
+- name: Verificar se o firewall UFW esta instalado
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: ufw_bin
+
+- name: Permitir trafego da rede Docker para as portas das aplicacoes no UFW
+  community.general.ufw:
+    rule: allow
+    src: "{{ rede.subnet }}"
+    proto: tcp
+    to_port: "{{ item.porta | string }}"
+    comment: "Projeto A2 - {{ item.nome }}"
+  loop: "{{ app_servers }}"
+  loop_control:
+    label: "{{ item.nome }} (:{{ item.porta }})"
+  when: ufw_bin.stat.exists

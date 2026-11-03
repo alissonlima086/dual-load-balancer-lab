@@ -1,0 +1,8 @@
+---
+- name: Recarregar Caddy
+  community.docker.docker_container_exec:
+    container: "{{ item.nome }}"
+    command: caddy reload --config /etc/caddy/Caddyfile
+  loop: "{{ load_balancers }}"
+  loop_control:
+    label: "{{ item.nome }}"

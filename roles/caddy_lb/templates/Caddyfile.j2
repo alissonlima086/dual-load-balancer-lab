@@ -1,0 +1,24 @@
+{
+    servers {
+        trusted_proxies static private_ranges
+    }
+}
+
+:{{ lb.porta }} {
+    header X-Load-Balancer "{{ lb.nome }}"
+
+    reverse_proxy {
+        to {% for app in app_servers %}{{ rede.gateway }}:{{ app.porta }}{% if not loop.last %} {% endif %}{% endfor %}
+
+        lb_policy {{ balanceamento.politica }}
+        lb_try_duration {{ balanceamento.tentativa_duracao }}
+        lb_try_interval {{ balanceamento.tentativa_intervalo }}
+
+        header_up X-Load-Balancer "{{ lb.nome }}"
+
+        health_uri {{ balanceamento.health_uri }}
+        health_interval {{ balanceamento.health_intervalo }}
+        health_timeout {{ balanceamento.health_timeout }}
+        fail_duration {{ balanceamento.fail_duration }}
+    }
+}

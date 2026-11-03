@@ -1,0 +1,28 @@
+---
+- name: Diagnostico do ambiente
+  hosts: vps
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Inspecionar estado dos containers Docker Caddy
+      community.docker.docker_container_info:
+        name: "{{ item.nome }}"
+      loop: "{{ load_balancers }}"
+      register: lb_info
+
+    - name: Inspecionar estado dos servicos systemd Python
+      ansible.builtin.systemd_service:
+        name: "a2-{{ item.nome }}"
+      loop: "{{ app_servers }}"
+      register: app_info
+
+    - name: Resumo do Diagnostico
+      ansible.builtin.debug:
+        msg:
+          - "DIAGNOSTICO DA INFRAESTRUTURA (Host: {{ ansible_host }})"
+          - "Balanceadores Caddy (Docker em {{ lb_bind_ip }}):"
+          - "{% for c in lb_info.results %}  - {{ c.item.nome }}: {% if c.exists and c.container.State.Running %}ATIVO (Porta {{ c.item.porta }}){% else %}INATIVO ou AUSENTE{% endif %}{% endfor %}"
+          - "Servidores Python (systemd em {{ app_bind_ip }}):"
+          - "{% for a in app_info.results %}  - {{ a.item.nome }} ({{ a.item.cor_nome }}): {% if a.status.ActiveState == 'active' %}ATIVO na porta {{ a.item.porta }} (PID: {{ a.status.MainPID }}){% else %}INATIVO ({{ a.status.ActiveState | upper }}){% endif %}{% endfor %}"
+          - "{% if front_url | length > 0 %}Ponto de entrada publico: {{ front_url }}{% else %}Ponto de entrada publico: Nao configurado{% endif %}"
