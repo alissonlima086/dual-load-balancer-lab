@@ -5,20 +5,26 @@
 }
 
 :{{ lb.porta }} {
-    header X-Load-Balancer "{{ lb.nome }}"
+    handle /health {
+        respond 200
+    }
 
-    reverse_proxy {
-        to {% for app in app_servers %}{{ rede.gateway }}:{{ app.porta }}{% if not loop.last %} {% endif %}{% endfor %}
+    handle {
+        header X-Load-Balancer "{{ lb.nome }}"
 
-        lb_policy {{ balanceamento.politica }}
-        lb_try_duration {{ balanceamento.tentativa_duracao }}
-        lb_try_interval {{ balanceamento.tentativa_intervalo }}
+        reverse_proxy {
+            to {% for app in app_servers %}{{ rede.gateway }}:{{ app.porta }}{% if not loop.last %} {% endif %}{% endfor %}
 
-        header_up X-Load-Balancer "{{ lb.nome }}"
+            lb_policy {{ balanceamento.politica }}
+            lb_try_duration {{ balanceamento.tentativa_duracao }}
+            lb_try_interval {{ balanceamento.tentativa_intervalo }}
 
-        health_uri {{ balanceamento.health_uri }}
-        health_interval {{ balanceamento.health_intervalo }}
-        health_timeout {{ balanceamento.health_timeout }}
-        fail_duration {{ balanceamento.fail_duration }}
+            header_up X-Load-Balancer "{{ lb.nome }}"
+
+            health_uri {{ balanceamento.health_uri }}
+            health_interval {{ balanceamento.health_intervalo }}
+            health_timeout {{ balanceamento.health_timeout }}
+            fail_duration {{ balanceamento.fail_duration }}
+        }
     }
 }
