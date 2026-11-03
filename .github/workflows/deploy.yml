@@ -1,0 +1,53 @@
+name: Deploy e Testes (Ansible)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Provisionar VPS e Rodar Testes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias locais
+        run: |
+          pip install -r requirements.txt
+          ansible-galaxy collection install -r requirements.yml
+
+      - name: Configurar Chave SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Executar Deploy (Ansible Site)
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          A2_FRONT_URL: ${{ secrets.A2_FRONT_URL }}
+          LB_BIND_IP: "127.0.0.1"
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          ansible-playbook -i inventory/hosts.yml playbooks/site.yml
+
+      - name: Executar Bateria de Testes Automatizados (T1 a T7)
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          A2_FRONT_URL: ${{ secrets.A2_FRONT_URL }}
+          LB_BIND_IP: "127.0.0.1"
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: |
+          ansible-playbook -i inventory/hosts.yml playbooks/testes.yml
