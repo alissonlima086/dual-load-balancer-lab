@@ -1,0 +1,499 @@
+==========================================================================
+  DUAL LOAD BALANCER LAB - GUIA DE EXECUÇÃO LOCAL E ROTEIRO DE TESTES
+  Notebook Windows + WSL (Ubuntu 24.04)
+==========================================================================
+
+SUMÁRIO
+  1. Visão geral (o que roda e onde)
+  2. Antes da apresentação: subir o ambiente
+  3. Funções auxiliares (instalar uma vez)
+  4. Roteiro de testes manuais (apresentação)
+       Estado inicial
+       T3 - Distribuição uniforme
+       T4 - Queda de um servidor com tráfego contínuo
+       T5 - Recuperação do servidor
+       T6 - Falha múltipla (só 1 servidor de pé)
+       T7 - Failover entre load balancers
+       Extras - crash com reinício automático / falha total
+  5. Testes automatizados (Ansible / make)
+  6. Comandos úteis
+  7. Encerrar o ambiente
+  8. Solução de problemas
+  9. Instalação do zero (referência - já feita neste notebook)
+
+IMPORTANTE: todos os comandos, exceto os marcados [PowerShell], são
+executados no terminal do UBUNTU (WSL). Os comandos "make" precisam ser
+rodados dentro da pasta ~/dual-load-balancer-lab.
+
+
+==========================================================================
+1. VISÃO GERAL
+==========================================================================
+
+                         Navegador / curl
+                                |
+               a2-front (Caddy, Docker)  :8080       <- entrada única (T7)
+                  /                       \
+     lb1 (Caddy, Docker)            lb2 (Caddy, Docker)   <- balanceadores
+     127.0.0.1:31081                127.0.0.1:31082
+                  \                       /
+           round robin + health check ativo em /health
+         +-------------+-------------+-------------+
+         |             |             |             |
+       app1          app2          app3          app4     <- Python (systemd)
+       Azul          Verde         Laranja       Roxo
+      :31001        :31002        :31003        :31004    (IP 10.28.0.1)
+
+  Nomes usados nos comandos:
+    Servidores de aplicação (systemd) : a2-app1  a2-app2  a2-app3  a2-app4
+    Load balancers (containers)       : lb1  lb2
+    Caddy frontal (container)         : a2-front
+
+  Cabeçalhos de resposta (mostram quem atendeu cada requisição):
+    X-Load-Balancer -> qual LB atendeu (lb1 / lb2)
+    X-Servidor      -> qual app atendeu (app1 .. app4)
+
+  Parâmetros de resiliência (definidos no .env):
+    - health check ativo a cada 3s em /health (timeout de 1s)
+    - um nó que falhou fica 5s fora do rodízio (fail_duration)
+    - se um nó não responde, o Caddy tenta o próximo por até 3s, a cada
+      250ms (lb_try_duration / lb_try_interval)
+      => o cliente NÃO vê erro quando um nó cai.
+    - Na prática, um nó religado volta ao rodízio em ~5 a 10 segundos.
+
+  No navegador do Windows:
+    http://localhost:8080    -> front (cada F5 pode trocar LB e app/cor)
+    http://localhost:31081   -> lb1 direto
+    http://localhost:31082   -> lb2 direto
+
+
+==========================================================================
+2. ANTES DA APRESENTAÇÃO: SUBIR O AMBIENTE
+==========================================================================
+
+  1) Abrir o Ubuntu: Menu Iniciar -> "Ubuntu 24.04"
+     (ou, no [PowerShell]:  wsl -d Ubuntu-24.04 )
+
+  2) Entrar na pasta do projeto (cópia que fica DENTRO do Linux):
+       cd ~/dual-load-balancer-lab
+
+  3) (Somente se alterou algo na pasta do Windows e fez commit lá)
+       git pull
+
+  4) Subir a infraestrutura (rede Docker, 4 apps, lb1 e lb2):
+       make up
+
+  5) Ligar o Caddy frontal:
+       docker start a2-front
+
+  6) Conferir se está tudo de pé:
+       make verify
+       req                  (função da seção 3: deve mostrar 200 em tudo)
+
+  7) Dica para a apresentação: use DOIS terminais lado a lado
+     (no Windows Terminal, Alt+Shift+D divide a tela).
+       Terminal [A] -> comandos que derrubam e sobem servidores
+       Terminal [B] -> tráfego contínuo (função "trafego"), para a turma
+                       ver em tempo real quem está respondendo
+
+
+==========================================================================
+3. FUNÇÕES AUXILIARES (instalar uma vez)
+==========================================================================
+
+  Copie e cole o bloco INTEIRO abaixo no terminal do Ubuntu, UMA única
+  vez. Ele grava as funções no ~/.bashrc, então elas ficam disponíveis
+  em qualquer terminal novo.
+
+cat >> ~/.bashrc <<'EOF'
+# --- Funções do dual-load-balancer-lab ---
+FMT='%{http_code}  %header{x-load-balancer} -> %header{x-servidor}\n'
+req()     { for i in $(seq 1 "${2:-8}"); do curl -s -o /dev/null --max-time 10 -w "$FMT" "${1:-http://localhost:8080/}"; done; }
+contar()  { for i in $(seq 1 "${2:-20}"); do curl -s -o /dev/null --max-time 10 -w '%header{x-servidor}\n' "${1:-http://127.0.0.1:31081/}"; done | sort | uniq -c; }
+trafego() { while true; do printf '%s  ' "$(date +%T)"; curl -s -o /dev/null --max-time 10 -w "$FMT" "${1:-http://localhost:8080/}"; sleep 0.5; done; }
+EOF
+source ~/.bashrc
+
+  Como usar:
+    req [URL] [N]      -> envia N requisições (padrão: 8, no front :8080)
+                          e mostra "status  LB -> APP" de cada uma
+    contar [URL] [N]   -> envia N requisições (padrão: 20, no lb1) e conta
+                          quantas cada app atendeu
+    trafego [URL]      -> tráfego contínuo (2 req/s) até apertar Ctrl+C
+
+  Exemplos:
+    req                               # 8 req no front (alterna lb1 / lb2)
+    req http://127.0.0.1:31081/ 8     # 8 req direto no lb1
+    contar http://127.0.0.1:31082/ 20 # distribuição no lb2
+    trafego http://127.0.0.1:31081/   # tráfego contínuo no lb1
+
+  Exemplo de saída (trafego):
+    16:15:33  200  lb1 -> app2
+    16:15:33  200  lb1 -> app3
+    16:15:34  200  lb1 -> app4
+    16:15:34  200  lb1 -> app1
+
+  Códigos: 200 = sucesso | 502 = nenhum servidor disponível |
+           000 = não conectou (LB/front fora do ar)
+
+
+==========================================================================
+4. ROTEIRO DE TESTES MANUAIS (APRESENTAÇÃO)
+==========================================================================
+
+  Pré-requisito: seção 2 concluída (make up + docker start a2-front).
+  Convenção: [A] = Terminal A (ações)   [B] = Terminal B (observação)
+
+  ------------------------------------------------------------------------
+  ESTADO INICIAL - tudo funcionando
+  ------------------------------------------------------------------------
+  [A] make status
+  [A] req http://127.0.0.1:31081/ 8
+        -> o lb1 alterna app1, app2, app3, app4, app1, ...
+  [A] req
+        -> o front alterna lb1 / lb2, e cada LB alterna os apps
+  Navegador: abrir http://localhost:8080 e apertar F5 várias vezes
+        -> a cor muda (Azul=app1, Verde=app2, Laranja=app3, Roxo=app4)
+
+  ------------------------------------------------------------------------
+  T3 - DISTRIBUIÇÃO UNIFORME (round robin)
+  ------------------------------------------------------------------------
+  Objetivo: mostrar que cada LB divide a carga igualmente entre os 4 apps.
+
+  [A] contar http://127.0.0.1:31081/ 20
+  [A] contar http://127.0.0.1:31082/ 20
+
+  Esperado (para cada LB):
+        5 app1
+        5 app2
+        5 app3
+        5 app4
+
+  ------------------------------------------------------------------------
+  T4 - QUEDA DE UM SERVIDOR COM TRÁFEGO CONTÍNUO
+  ------------------------------------------------------------------------
+  Objetivo: derrubar o app2 com tráfego rodando e mostrar que nenhuma
+            requisição falha; o app2 sai sozinho do rodízio.
+
+  [B] trafego http://127.0.0.1:31081/
+  [A] sudo systemctl stop a2-app2          # DERRUBA o app2
+  [A] systemctl is-active a2-app2          # -> inactive
+
+  Esperado no [B]: continua tudo 200 e o app2 some (só aparecem app1,
+  app3 e app4). No momento da queda pode haver uma resposta um pouco mais
+  lenta: o Caddy tenta de novo no próximo servidor.
+
+  -> NÃO religue o app2 ainda: o T5 continua daqui.
+
+  ------------------------------------------------------------------------
+  T5 - RECUPERAÇÃO DO SERVIDOR
+  ------------------------------------------------------------------------
+  Objetivo: religar o app2 e mostrar que ele volta sozinho ao rodízio
+            (health check ativo), sem mexer no load balancer.
+
+  [B] (manter o "trafego" do T4 rodando)
+  [A] sudo systemctl start a2-app2         # SOBE o app2 de novo
+  [A] systemctl is-active a2-app2          # -> active
+
+  Esperado no [B]: em ~5 a 10 segundos o app2 volta a aparecer.
+  [B] Ctrl+C para parar o tráfego.
+
+  ------------------------------------------------------------------------
+  T6 - FALHA MÚLTIPLA (3 servidores fora, só o app4 de pé)
+  ------------------------------------------------------------------------
+  Objetivo: mostrar que um único servidor sobrevivente atende tudo.
+
+  [B] trafego http://127.0.0.1:31081/
+  [A] sudo systemctl stop a2-app1 a2-app2 a2-app3
+
+  Esperado no [B]: todas as respostas 200, todas vindas do app4.
+
+  Restaurar:
+  [A] sudo systemctl start a2-app1 a2-app2 a2-app3
+  Esperado no [B]: em ~5 a 10 s os 4 apps voltam a alternar.
+  [B] Ctrl+C
+
+  ------------------------------------------------------------------------
+  T7 - FAILOVER ENTRE LOAD BALANCERS (pelo Caddy frontal :8080)
+  ------------------------------------------------------------------------
+  Objetivo: derrubar um LB inteiro e mostrar que o outro assume sozinho.
+
+  [B] trafego                   (sem URL = front http://localhost:8080/)
+        -> no início alterna lb1 / lb2
+
+  Etapa 1 - derrubar o lb1:
+  [A] docker stop lb1
+        Esperado no [B]: tudo 200, só "lb2 -> ..."
+
+  Subir o lb1 de novo:
+  [A] docker start lb1
+        Esperado no [B]: em ~5 a 10 s volta a alternar lb1 / lb2
+
+  Etapa 2 - derrubar o lb2:
+  [A] docker stop lb2
+        Esperado no [B]: tudo 200, só "lb1 -> ..."
+
+  Subir o lb2 de novo:
+  [A] docker start lb2
+        Esperado no [B]: em ~5 a 10 s volta a alternar lb1 / lb2
+  [B] Ctrl+C
+
+  Ver o estado dos containers a qualquer momento:
+  [A] docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+
+  ------------------------------------------------------------------------
+  EXTRA 1 - CRASH DE UM SERVIDOR (reinício automático pelo systemd)
+  ------------------------------------------------------------------------
+  Diferença importante:
+    - "systemctl stop" = parada intencional -> o systemd NÃO religa.
+    - crash (processo morto) -> o systemd religa sozinho em ~2s
+      (o serviço usa Restart=always).
+
+  [A] systemctl show -p MainPID a2-app3    # anote o PID atual
+  [A] sudo systemctl kill -s KILL a2-app3  # mata o processo (simula crash)
+  [A] systemctl show -p MainPID a2-app3    # após ~2s: PID NOVO
+  [A] systemctl is-active a2-app3          # -> active
+
+  ------------------------------------------------------------------------
+  EXTRA 2 - FALHA TOTAL DOS SERVIDORES (limite do sistema)
+  ------------------------------------------------------------------------
+  [A] sudo systemctl stop a2-app1 a2-app2 a2-app3 a2-app4
+  [A] req http://127.0.0.1:31081/ 1
+        -> depois de ~3s de tentativas, responde 502 (sem servidores)
+
+  Restaurar:
+  [A] sudo systemctl start a2-app1 a2-app2 a2-app3 a2-app4
+  [A] (aguarde ~5 a 10 s)  req http://127.0.0.1:31081/ 8
+
+
+==========================================================================
+5. TESTES AUTOMATIZADOS (Ansible)
+==========================================================================
+
+  Dentro de ~/dual-load-balancer-lab:
+    make verify     -> confere containers, serviços e se os 4 apps respondem
+    make test       -> roda T3, T4, T5, T6 e T7 em sequência
+    make test-t3    -> só o T3 (também: test-t4, test-t5, test-t6, test-t7)
+
+  - Os testes automáticos derrubam e restauram os servidores sozinhos.
+  - Linhas "FAILED - RETRYING" são NORMAIS: é o Ansible aguardando o
+    health check reintegrar o nó. O que vale é ver as mensagens
+    "APROVADO" e, no PLAY RECAP, failed=0.
+  - O T7 precisa do a2-front ligado (docker start a2-front).
+
+
+==========================================================================
+6. COMANDOS ÚTEIS
+==========================================================================
+
+  Makefile (dentro de ~/dual-load-balancer-lab):
+    make help        -> lista todos os comandos
+    make status      -> diagnóstico rápido (containers e serviços)
+    make up          -> sobe / reaplica a infraestrutura
+    make verify      -> verificação de saúde e rodízio
+    make down        -> remove tudo (exceto o a2-front)
+
+  Servidores de aplicação (systemd):
+    systemctl is-active a2-app1 a2-app2 a2-app3 a2-app4
+    systemctl status a2-app2               (q para sair)
+    sudo systemctl stop    a2-app2
+    sudo systemctl start   a2-app2
+    sudo systemctl restart a2-app2
+    journalctl -u a2-app2 -f               (logs ao vivo; Ctrl+C sai)
+    journalctl -u a2-app2 -n 50            (últimas 50 linhas)
+
+  Containers (Docker):
+    docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+    docker stop lb1          |  docker start lb1
+    docker stop lb1 lb2      |  docker start lb1 lb2
+    docker restart lb1
+    docker logs -f lb1                     (logs ao vivo; Ctrl+C sai)
+    docker logs -f a2-front
+
+  Requisições "na mão":
+    curl -s -D - -o /dev/null http://localhost:8080/
+        -> mostra os cabeçalhos (X-Load-Balancer / X-Servidor)
+    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:31081/health
+        -> health do lb1 (200)
+    curl -s http://10.28.0.1:31002/health
+        -> health direto do app2 (responde "ok app2")
+
+  Arquivos de configuração gerados:
+    cat /opt/a2/caddy/lb1/Caddyfile            (config do lb1)
+    cat /etc/systemd/system/a2-app1.service    (serviço do app1)
+    cat ~/a2-front/Caddyfile                   (config do Caddy frontal)
+    cat ~/dual-load-balancer-lab/.env          (variáveis do ambiente)
+
+  Rede:
+    docker network inspect a2_net
+    sudo ss -ltnp | grep -E ':(3100[1-4]|3108[12]|8080) '   (portas abertas)
+
+
+==========================================================================
+7. ENCERRAR O AMBIENTE
+==========================================================================
+
+  [Ubuntu]
+    cd ~/dual-load-balancer-lab
+    make down                 -> remove apps, LBs, rede Docker e /opt/a2
+    docker stop a2-front      -> para o Caddy frontal (o make down não
+                                 mexe nele)
+
+  [PowerShell] (opcional: desliga o Linux e libera memória)
+    wsl --terminate Ubuntu-24.04
+
+  Para voltar a usar: seção 2 (make up + docker start a2-front).
+
+
+==========================================================================
+8. SOLUÇÃO DE PROBLEMAS
+==========================================================================
+
+  * "make: *** No rule to make target 'up'"
+      -> você não está na pasta do projeto:  cd ~/dual-load-balancer-lab
+
+  * NÃO rode o projeto pela pasta do Windows (/mnt/c/...): lá o Ansible
+    ignora o ansible.cfg e os arquivos têm quebra de linha do Windows.
+    Use sempre ~/dual-load-balancer-lab.
+
+  * "permission denied ... docker.sock"
+      -> use "sudo docker ..." ou feche e abra o terminal.
+
+  * "Docker nao encontrado" ou Docker parado
+      -> sudo systemctl start docker
+
+  * "No such container: a2-front"
+      -> recrie o Caddy frontal (seção 9, passo 6).
+
+  * Um app não volta ao rodízio
+      -> sudo systemctl start a2-appN
+         journalctl -u a2-appN -n 50       (troque N pelo número do app)
+
+  * Algo estranho e quer começar do zero:
+      make down && make up && docker start a2-front && make verify
+
+  * localhost não abre no navegador do Windows:
+      -> no Ubuntu rode "hostname -I" e use o 1º IP mostrado:
+         http://<IP>:8080  (só o front; lb1/lb2 escutam apenas em
+         127.0.0.1)
+
+  * Alterou código na pasta do Windows:
+      -> faça commit lá e, no Ubuntu:
+         cd ~/dual-load-balancer-lab && git pull && make up
+
+
+==========================================================================
+9. INSTALAÇÃO DO ZERO (referência - JÁ FEITO neste notebook)
+==========================================================================
+
+  Útil para reinstalar ou montar o laboratório em outro Windows.
+
+  1) [PowerShell] Instalar o Ubuntu 24.04 no WSL (pede usuário e senha):
+       wsl --install -d Ubuntu-24.04
+     Use a 24.04: o ansible-core 2.17 do projeto só aceita Python até 3.12.
+
+  2) [Ubuntu] Pacotes, Docker e sudo sem senha:
+       sudo apt-get update
+       sudo apt-get install -y docker.io make python3-venv python3-pip python3-docker git jq curl ufw
+       sudo systemctl enable --now docker
+       sudo usermod -aG docker $USER
+       echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-$USER
+       sudo chmod 0440 /etc/sudoers.d/90-$USER
+     Depois feche e abra o terminal (para o grupo docker valer).
+
+     Obs.: use o Docker DENTRO do Ubuntu (pacote docker.io), não o Docker
+     Desktop: os apps fazem bind no gateway da rede Docker (10.28.0.1),
+     que só existe se o Docker rodar no mesmo Linux que o systemd.
+
+  3) [Ubuntu] Clonar o projeto DENTRO do Linux (não use /mnt/c):
+       git clone https://github.com/alissonlima086/dual-load-balancer-lab.git ~/dual-load-balancer-lab
+
+     (Neste notebook o clone foi feito a partir da pasta do Windows:)
+       git clone "/mnt/c/Users/Lucas Henderson/Documents/unitins/sistemas_distribuidos/dual-load-balancer-lab" ~/dual-load-balancer-lab
+
+  4) [Ubuntu] Ambiente Python com Ansible:
+       cd ~/dual-load-balancer-lab
+       python3 -m venv .venv
+       .venv/bin/pip install -r requirements.txt
+       .venv/bin/ansible-galaxy collection install -r requirements.yml -p .venv/collections
+
+  5) [Ubuntu] Criar o .env local (copie o bloco inteiro, dentro da pasta
+     ~/dual-load-balancer-lab):
+
+cat > .env <<'EOF'
+# .env para execucao LOCAL no WSL (o proprio notebook e o "servidor")
+VPS_HOST=127.0.0.1
+VPS_USER=lucas_henderson
+VPS_PORT=22
+
+# Sem SSH: o Ansible roda localmente na propria maquina
+A2_SENHA_SSH=0
+ARGS=-e ansible_connection=local
+
+# Sudo sem senha configurado no WSL
+A2_SEM_SENHA=1
+
+# Balanceadores Caddy (Containers Docker em loopback)
+LB_BIND_IP=127.0.0.1
+LB1_PORT=31081
+LB2_PORT=31082
+
+# Ponto de entrada (Caddy frontal local, container a2-front)
+A2_FRONT_URL=http://localhost:8080
+
+# Portas das aplicacoes Python HTTP (systemd)
+APP1_PORT=31001
+APP2_PORT=31002
+APP3_PORT=31003
+APP4_PORT=31004
+
+# Diretorio e rede no servidor
+# Sub-rede fora de 172.16.0.0/12 para nao colidir com a rede NAT do WSL (que muda a cada boot)
+A2_DATA_DIR=/opt/a2
+A2_DOCKER_NET_NAME=a2_net
+A2_DOCKER_SUBNET=10.28.0.0/24
+A2_DOCKER_GATEWAY=10.28.0.1
+
+# Politicas de balanceamento e resiliencia
+A2_LB_POLICY=round_robin
+A2_LB_TRY_DURATION=3s
+A2_LB_TRY_INTERVAL=250ms
+A2_HEALTH_URI=/health
+A2_HEALTH_INTERVAL=3s
+A2_HEALTH_TIMEOUT=1s
+A2_FAIL_DURATION=5s
+EOF
+
+     Diferenças em relação ao .env.example:
+       - ARGS=-e ansible_connection=local -> roda sem SSH (na própria máquina)
+       - A2_SENHA_SSH=0                   -> não pede senha de SSH
+       - A2_FRONT_URL=http://localhost:8080 -> Caddy frontal local (T7)
+       - sub-rede 10.28.0.0/24            -> evita conflito com a rede do WSL
+     Se NÃO configurou sudo sem senha, use A2_SEM_SENHA=0 (o make vai
+     pedir a senha do sudo: "BECOME password").
+
+  6) [Ubuntu] Criar o Caddy frontal (usado no T7) - copie o bloco inteiro:
+
+mkdir -p ~/a2-front
+cat > ~/a2-front/Caddyfile <<'EOF'
+# Caddy frontal LOCAL - equivalente ao host/Caddyfile.snippet, em HTTP na porta 8080
+:8080 {
+    reverse_proxy 127.0.0.1:31081 127.0.0.1:31082 {
+        lb_policy round_robin
+        lb_try_duration 3s
+        lb_try_interval 250ms
+        health_uri /health
+        health_interval 3s
+        health_timeout 1s
+        fail_duration 5s
+    }
+}
+EOF
+docker run -d --name a2-front --network host --restart unless-stopped -v "$HOME/a2-front:/etc/caddy:ro" caddy:2.8.4-alpine
+
+  7) [Ubuntu] Testar a conexão e subir o ambiente:
+       make ping       -> deve responder "pong"
+       make up
+       make verify
+
+==========================================================================
